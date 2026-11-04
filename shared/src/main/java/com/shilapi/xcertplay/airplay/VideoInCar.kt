@@ -73,6 +73,9 @@ internal class VideoPlaybackAvailability(
  * licensed FairPlay receiver. Plain http(s) media such as Safari's plays.
  */
 object VideoInCar {
+    /** Bounded, opt-in FCUP responses: one HLS resource plus its nested plist envelopes. */
+    const val MAX_RESOURCE_BYTES = 32 * 1024 * 1024
+    internal const val MAX_RESOURCE_COMMAND_BYTES = MAX_RESOURCE_BYTES + 64 * 1024
     const val FEATURE = "videoPlayback"
     const val UI_URL = "videoplayback:"
     const val SETTINGS_CHANNEL_UUID = "BB493F61-A6B8-4769-8D74-80C23A9F71C4"
@@ -86,7 +89,7 @@ object VideoInCar {
     const val ERROR_DECODER = -12911
     const val ERROR_INCOMPATIBLE_ASSET = -12927
 
-    /** Whether video may play now; the host sets it from the car's gear (P only). */
+    /** Whether video may play now; owned by the video gate (P only, unless explicitly overridden). */
     @Volatile var allowed = false
 
     /** Bits the AirPlay web app's manifest adds to the legacy feature bits (featureList.additionalAirPlayFeatures). */

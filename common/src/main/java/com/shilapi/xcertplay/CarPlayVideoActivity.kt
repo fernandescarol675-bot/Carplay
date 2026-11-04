@@ -1,9 +1,9 @@
 package com.shilapi.xcertplay
 
-import android.app.Activity
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.InsetDrawable
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -21,19 +21,26 @@ import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.annotation.OptIn
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.upstream.DefaultAllocator
+import androidx.media3.exoplayer.DecoderReuseEvaluation
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.hls.HlsManifest
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
@@ -42,6 +49,7 @@ import com.shilapi.xcertplay.host.R
 import java.util.Locale
 import androidx.media3.ui.R as Media3R
 import kotlin.math.roundToInt
+import kotlin.math.ceil
 
 /**
  * The car's own player for iOS 27 video in car (see [CarPlayVideo]). Full screen over CarPlay, which
@@ -54,7 +62,7 @@ import kotlin.math.roundToInt
  * protected item that cannot play here is easy to tell apart.
  */
 @OptIn(UnstableApi::class)
-class CarPlayVideoActivity : Activity() {
+class CarPlayVideoActivity : ComponentActivity() {
     private val main = Handler(Looper.getMainLooper())
     private lateinit var player: ExoPlayer
     private lateinit var controls: View
@@ -65,7 +73,12 @@ class CarPlayVideoActivity : Activity() {
     private var scrubbing = false
     private var loadedUrl: String? = null
     private var prepared = false
+    internal var playbackReleased = false
+        private set
     private var encryptionLogged = false
+    private var iphoneNetworkVideo = false
+    private var iphoneAllocator: DefaultAllocator? = null
+    private val completion = VideoPlaybackCompletion { onPlaybackCompleted() }
     private val hideControls = Runnable {
         controls.visibility = View.GONE
         main.removeCallbacks(tick)
@@ -79,16 +92,43 @@ class CarPlayVideoActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!CarPlayVideo.attachPlayer(this)) {
+            finish()
+            return
+        }
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() = returnToCarPlay()
+        })
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.systemBars())
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
         val http = DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
-        val sources = IphoneResolvingDataSource.Factory(DefaultDataSource.Factory(this, http))
-        player = ExoPlayer.Builder(this).setMediaSourceFactory(DefaultMediaSourceFactory(sources)).build()
+        val useIphoneNetwork = AirPlayPersistence.loadVideoUseIphoneNetwork(this)
+        iphoneNetworkVideo = useIphoneNetwork
+        Log.i(TAG, "video resource loader=${if (useIphoneNetwork) "iphone-experimental" else "receiver"}")
+        CarPlayVideo.diagnostic("event=player_created iphoneNetwork=$useIphoneNetwork")
+        val generation = CarPlayVideo.playbackGeneration
+        val sources = IphoneResolvingDataSource.Factory(DefaultDataSource.Factory(this, http), useIphoneNetwork, CarPlayVideo::diagnostic) {
+            CarPlayVideo.resolveOnIphone(it, generation)
+        }
+        val mediaSources = DefaultMediaSourceFactory(sources)
+        val playerBuilder = ExoPlayer.Builder(this).setMediaSourceFactory(mediaSources)
+        if (useIphoneNetwork) {
+            val heap = Runtime.getRuntime().maxMemory()
+            val allocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
+            iphoneAllocator = allocator
+            val control = IphoneVideoPlaybackPolicy.loadControl(heap, allocator)
+            playerBuilder.setLoadControl(control)
+            mediaSources.setLoadErrorHandlingPolicy(IphoneVideoPlaybackPolicy(CarPlayVideo::diagnostic))
+            CarPlayVideo.diagnostic("event=buffer_policy targetBytes=${IphoneVideoPlaybackPolicy.targetBufferBytes(heap)} maxHeapBytes=$heap")
+        }
+        player = playerBuilder.build()
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
+                CarPlayVideo.diagnostic("event=buffer_state state=$state bufferedMs=${player.totalBufferedDuration} loading=${player.isLoading} allocatedBytes=${iphoneAllocator?.totalBytesAllocated ?: -1}")
                 if (state == Player.STATE_READY && !prepared) {
                     prepared = true
                     Log.i(TAG, "prepared duration=${player.duration} ms size=${player.videoSize.width}x${player.videoSize.height}")
@@ -97,8 +137,14 @@ class CarPlayVideoActivity : Activity() {
 
             override fun onTimelineChanged(timeline: Timeline, reason: Int) = logEncryption()
 
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                CarPlayVideo.diagnostic("event=video_size width=${videoSize.width} height=${videoSize.height}")
+            }
+
             override fun onPlayerError(error: PlaybackException) {
-                Log.w(TAG, "player error ${error.errorCodeName}: ${causes(error)}")
+                if (playbackReleased) return
+                CarPlayVideo.diagnostic("event=player_error generation=$generation code=${error.errorCode} type=${error.javaClass.simpleName} causes=${VideoLoadDiagnostics.causes(error)}")
+                Log.w(TAG, "player error ${error.errorCodeName}: ${VideoLoadDiagnostics.causes(error)}")
                 CarPlayVideo.onPlayerFailed(
                     when (error.errorCode) {
                         in 2000..2999 -> VideoInCar.ERROR_NETWORK // IO
@@ -106,6 +152,14 @@ class CarPlayVideoActivity : Activity() {
                         else -> VideoInCar.ERROR_INCOMPATIBLE_ASSET // parsing, DRM, unsupported
                     },
                 )
+            }
+        })
+        player.addListener(completion)
+        player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onVideoInputFormatChanged(eventTime: AnalyticsListener.EventTime, format: Format,
+                decoderReuseEvaluation: DecoderReuseEvaluation?) {
+                // Adaptive groups contain multiple candidates; report the format actually fed to the decoder.
+                CarPlayVideo.diagnostic("event=video_track width=${format.width} height=${format.height} bitrate=${format.bitrate}")
             }
         })
         val view = PlayerView(this).apply {
@@ -120,41 +174,62 @@ class CarPlayVideoActivity : Activity() {
             addView(controls, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         })
         view.setOnClickListener { showControls() }
-        CarPlayVideo.activity = this
         load()
         showControls()
     }
 
     private fun controlBar(): View {
-        val back = TextView(this).apply {
-            text = "‹  " + getString(R.string.video_back_to_carplay)
+        val back = IconAlignedTextView(this).apply {
+            text = getString(R.string.video_back_to_carplay)
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, BACK_TEXT_SIZE_SP)
+            maxLines = 1
+            val iconSize = maxOf(dp(BACK_ICON_SIZE_DP), (textSize * BACK_ICON_TEXT_RATIO).roundToInt())
+                .coerceAtMost(dp(BACK_ICON_MAX_SIZE_DP))
+            val iconSideInset = (iconSize * BACK_ICON_SIDE_INSET_FRACTION).roundToInt()
+            val backIcon = getDrawable(R.drawable.ic_dp_back)?.mutate()?.let { drawable ->
+                // Keep the shared arrow at its original scale, but remove its transparent side
+                // bearings from text layout. The wrapper also preserves automatic RTL mirroring.
+                InsetDrawable(drawable, -iconSideInset, 0, -iconSideInset, 0).apply {
+                    isAutoMirrored = true
+                    setBounds(0, 0, iconSize - iconSideInset * 2, iconSize)
+                }
+            }
+            setCompoundDrawablesRelative(backIcon, null, null, null)
+            compoundDrawablePadding = dp(BACK_ICON_GAP_DP)
             gravity = Gravity.CENTER
-            minHeight = dp(64)
+            minHeight = dp(BACK_MIN_HEIGHT_DP)
             minWidth = dp(64)
-            setPadding(dp(24), 0, dp(24), 0)
-            background = GradientDrawable().apply { cornerRadius = dp(32).toFloat(); setColor(0xB3000000.toInt()) }
-            setOnClickListener { finish() }
+            setPadding(dp(BACK_HORIZONTAL_PADDING_DP), dp(BACK_VERTICAL_PADDING_DP),
+                dp(BACK_HORIZONTAL_PADDING_DP), dp(BACK_VERTICAL_PADDING_DP))
+            background = GradientDrawable().apply { setColor(0xB3000000.toInt()) }
+            setOnClickListener { returnToCarPlay() }
         }
         fun round(icon: Int, label: String, onClick: () -> Unit) = ImageView(this).apply {
             setImageResource(icon)
             setColorFilter(Color.WHITE)
             contentDescription = label
             scaleType = ImageView.ScaleType.FIT_CENTER
-            setPadding(dp(18), dp(18), dp(18), dp(18))
+            val padding = dp(CarPlayVideoControlsLayout.FULL_ICON_PADDING_DP)
+            setPadding(padding, padding, padding, padding)
             background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x80000000.toInt()) }
             setOnClickListener { onClick(); showControls() }
         }
         playPause = round(Media3R.drawable.exo_icon_play, "") { CarPlayVideo.setPlaying(!CarPlayVideo.playing) }
+        val rewind = round(Media3R.drawable.exo_icon_rewind, getString(Media3R.string.exo_controls_rewind_description)) {
+            skip(-CarPlayVideo.SKIP_MILLIS)
+        }
+        val forward = round(Media3R.drawable.exo_icon_fastforward, getString(Media3R.string.exo_controls_fastforward_description)) {
+            skip(CarPlayVideo.SKIP_MILLIS)
+        }
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
+            // Media transport follows playback direction, independently of the surrounding locale.
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
             gravity = Gravity.CENTER
-            addView(round(Media3R.drawable.exo_icon_rewind, getString(Media3R.string.exo_controls_rewind_description)) { skip(-CarPlayVideo.SKIP_MILLIS) },
-                LinearLayout.LayoutParams(dp(80), dp(80)))
-            addView(playPause, LinearLayout.LayoutParams(dp(96), dp(96)).apply { marginStart = dp(48); marginEnd = dp(48) })
-            addView(round(Media3R.drawable.exo_icon_fastforward, getString(Media3R.string.exo_controls_fastforward_description)) { skip(CarPlayVideo.SKIP_MILLIS) },
-                LinearLayout.LayoutParams(dp(80), dp(80)))
+            addView(rewind, LinearLayout.LayoutParams(dp(CarPlayVideoControlsLayout.FULL_SKIP_SIZE_DP), dp(CarPlayVideoControlsLayout.FULL_SKIP_SIZE_DP)))
+            addView(playPause, LinearLayout.LayoutParams(dp(CarPlayVideoControlsLayout.FULL_PLAY_SIZE_DP), dp(CarPlayVideoControlsLayout.FULL_PLAY_SIZE_DP)))
+            addView(forward, LinearLayout.LayoutParams(dp(CarPlayVideoControlsLayout.FULL_SKIP_SIZE_DP), dp(CarPlayVideoControlsLayout.FULL_SKIP_SIZE_DP)))
         }
         fun timeText() = TextView(this).apply {
             setTextColor(Color.WHITE)
@@ -189,6 +264,7 @@ class CarPlayVideoActivity : Activity() {
         }
         val timeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
             gravity = Gravity.CENTER_VERTICAL
             addView(position)
             addView(timeBar, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -196,15 +272,63 @@ class CarPlayVideoActivity : Activity() {
         }
         val bottom = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(32), dp(48), dp(32), dp(24))
+            setPadding(dp(CarPlayVideoControlsLayout.CONTENT_HORIZONTAL_INSET_DP), dp(48),
+                dp(CarPlayVideoControlsLayout.CONTENT_HORIZONTAL_INSET_DP), dp(24))
             background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP, intArrayOf(0xCC000000.toInt(), 0))
             addView(buttons)
             addView(timeRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 .apply { topMargin = dp(16) })
         }
-        return FrameLayout(this).apply {
+        return object : FrameLayout(this) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val windowWidth = MeasureSpec.getSize(widthMeasureSpec).coerceAtLeast(1)
+                val density = resources.displayMetrics.density
+                val sizes = CarPlayVideoControlsLayout.resolve(
+                    (windowWidth / density).toInt(), (MeasureSpec.getSize(heightMeasureSpec) / density).toInt())
+                val contentInset = dp(CarPlayVideoControlsLayout.CONTENT_HORIZONTAL_INSET_DP)
+                (back.layoutParams as LayoutParams).setMargins(contentInset, dp(BACK_TOP_MARGIN_DP), contentInset, 0)
+                val available = (windowWidth - contentInset * 2).coerceAtLeast(0)
+                val skipSize = dp(sizes.skipDp)
+                // Keep translated labels on one line within the shared content edges. Reset first
+                // so text can grow back to its preferred size when the window gets wider.
+                back.setTextSize(TypedValue.COMPLEX_UNIT_SP, BACK_TEXT_SIZE_SP)
+                val labelSpace = (available - back.compoundPaddingLeft - back.compoundPaddingRight).coerceAtLeast(0)
+                var labelSizeSp = BACK_TEXT_SIZE_SP
+                // Font fallback and glyph hinting do not scale linearly in every locale. Measure
+                // each candidate rather than assuming a proportional size will fit.
+                while (back.paint.measureText(back.text.toString()) > labelSpace && labelSizeSp > 0f) {
+                    labelSizeSp = (labelSizeSp - BACK_TEXT_STEP_SP).coerceAtLeast(0f)
+                    back.setTextSize(TypedValue.COMPLEX_UNIT_SP, labelSizeSp)
+                }
+                fun updateBackWidth() {
+                    (back.layoutParams as LayoutParams).width = minOf(available,
+                        ceil(back.paint.measureText(back.text.toString())).toInt() +
+                            back.compoundPaddingLeft + back.compoundPaddingRight)
+                }
+                updateBackWidth()
+                val playSize = minOf(dp(sizes.playDp), (available - skipSize * 2).coerceAtLeast(0))
+                val gap = minOf(dp(sizes.gapDp), (available - skipSize * 2 - playSize).coerceAtLeast(0) / 2)
+                for (button in listOf(rewind, forward, playPause)) {
+                    val size = if (button === playPause) playSize else skipSize
+                    (button.layoutParams as LinearLayout.LayoutParams).apply {
+                        width = size
+                        height = size
+                        // Both sides are equal; set resolved margins during measurement so a resize
+                        // does not reuse the previous layout-direction resolution.
+                        leftMargin = if (button === playPause) gap else 0
+                        rightMargin = if (button === playPause) gap else 0
+                    }
+                    val padding = dp(sizes.iconPaddingDp)
+                    button.setPadding(padding, padding, padding, padding)
+                }
+                super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+                // Wrap the actual text/icon height, including fallback fonts and scaled text.
+                (back.background as GradientDrawable).cornerRadius = back.measuredHeight / 2f
+            }
+        }.apply {
             addView(back, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START)
-                .apply { setMargins(dp(24), dp(24), dp(24), dp(24)) })
+                .apply { setMargins(dp(CarPlayVideoControlsLayout.CONTENT_HORIZONTAL_INSET_DP), dp(BACK_TOP_MARGIN_DP),
+                    dp(CarPlayVideoControlsLayout.CONTENT_HORIZONTAL_INSET_DP), 0) })
             addView(bottom, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
             // A tap on the picture while the controls show hides them again.
             setOnClickListener { hideControls.run() }
@@ -219,6 +343,22 @@ class CarPlayVideoActivity : Activity() {
         main.postDelayed(tick, TICK_MILLIS)
         main.removeCallbacks(hideControls)
         if (!scrubbing) main.postDelayed(hideControls, CONTROLS_MILLIS)
+    }
+
+    private fun returnToCarPlay() {
+        if (isFinishing) return
+        CarPlayVideo.dismissPlayer(if (prepared) player.currentPosition.toInt() else null)
+        // The player may have been opened from the app task; finish alone can expose the start page.
+        OwnScreenStart.start(this, CarPlayScreen.intent(this))
+        finish()
+    }
+
+    private fun onPlaybackCompleted() {
+        if (isFinishing || CarPlayVideo.activity !== this || loadedUrl != CarPlayVideo.url) return
+        CarPlayVideo.diagnostic("event=playback_completed action=return_to_carplay")
+        CarPlayVideo.onPlaybackCompleted()
+        OwnScreenStart.start(this, CarPlayScreen.intent(this))
+        finish()
     }
 
     private fun updatePlayPause() {
@@ -263,9 +403,11 @@ class CarPlayVideoActivity : Activity() {
     }
 
     fun load() {
+        if (playbackReleased || isFinishing) return
         val url = CarPlayVideo.url ?: return
         if (url == loadedUrl) return
         loadedUrl = url
+        completion.reset()
         prepared = false
         encryptionLogged = false
         Log.i(TAG, "loading video scheme=${Uri.parse(url).scheme.orEmpty()} ${playbackNetworkSummary()}")
@@ -278,7 +420,15 @@ class CarPlayVideoActivity : Activity() {
         applyRate()
     }
 
+    /** Main thread: trim unused blocks without dropping playable samples or changing quality. */
+    fun onResourcePressure(reason: String) {
+        if (playbackReleased || !iphoneNetworkVideo || !::player.isInitialized) return
+        iphoneAllocator?.trim()
+        CarPlayVideo.diagnostic("event=resource_pressure reason=$reason currentBitrate=${player.videoFormat?.bitrate ?: -1} bufferedMs=${player.totalBufferedDuration} allocatedBytes=${iphoneAllocator?.totalBytesAllocated ?: -1}")
+    }
+
     fun applyRate() {
+        if (playbackReleased) return
         player.playWhenReady = CarPlayVideo.playing
         if (controls.visibility == View.VISIBLE) updatePlayPause()
     }
@@ -302,6 +452,10 @@ class CarPlayVideoActivity : Activity() {
         val manifest = player.currentManifest as? HlsManifest ?: return
         encryptionLogged = true
         val media = manifest.mediaPlaylist
+        val master = manifest.multivariantPlaylist
+        CarPlayVideo.diagnostic("event=hls_manifest variants=${master.variants.size} audio=${master.audios.size} " +
+            "subtitles=${master.subtitles.size} segments=${media.segments.size} drmPresent=${media.protectionSchemes != null} " +
+            "sessionKeys=${master.sessionKeyDrmInitData.size}")
         val keyScheme = media.segments.firstNotNullOfOrNull { it.fullSegmentEncryptionKeyUri }
             ?.let { android.net.Uri.parse(it).scheme ?: "relative" }
         val drm = media.protectionSchemes?.let { init ->
@@ -311,9 +465,6 @@ class CarPlayVideoActivity : Activity() {
         Log.i(TAG, "HLS encryption aes128KeyScheme=$keyScheme sampleAesSchemeType=${media.protectionSchemes?.schemeType} " +
             "drmUuids=$drm sessionKeys=$sessionKeys segments=${media.segments.size}")
     }
-
-    private fun causes(error: Throwable): String = generateSequence(error) { it.cause }.take(4)
-        .joinToString(" <- ") { "${it.javaClass.simpleName}(${it.message?.replace(Regex("\\w+://\\S+"), "<url>")})" }
 
     private fun playbackNetworkSummary(): String {
         val manager = getSystemService(ConnectivityManager::class.java)
@@ -331,14 +482,27 @@ class CarPlayVideoActivity : Activity() {
             "validated=${capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)}"
     }
 
-    override fun onDestroy() {
+    /** Retire loaders first in CarPlayVideo, then synchronously release their player/file ownership. */
+    internal fun closePlayback() {
+        releasePlaybackResources()
+        finish()
+    }
+
+    private fun releasePlaybackResources() {
+        if (playbackReleased) return
+        playbackReleased = true
         main.removeCallbacks(hideControls)
         main.removeCallbacks(tick)
-        if (CarPlayVideo.activity === this) {
-            CarPlayVideo.activity = null
-            CarPlayVideo.onPlayerClosed(if (prepared) player.currentPosition.toInt() else null)
-        }
-        player.release()
+        if (::player.isInitialized) player.release()
+        iphoneAllocator?.reset()
+        val remaining = iphoneAllocator?.totalBytesAllocated ?: -1
+        iphoneAllocator = null
+        CarPlayVideo.diagnostic("event=player_resources_released sampleBytes=$remaining")
+    }
+
+    override fun onDestroy() {
+        releasePlaybackResources()
+        CarPlayVideo.detachPlayer(this, isChangingConfigurations)
         super.onDestroy()
     }
 
@@ -348,5 +512,17 @@ class CarPlayVideoActivity : Activity() {
         const val TAG = "DiPlay-Video"
         const val CONTROLS_MILLIS = 5_000L
         const val TICK_MILLIS = 500L
+        const val BACK_ICON_SIZE_DP = 28
+        const val BACK_TEXT_SIZE_SP = 20f
+        const val BACK_TEXT_STEP_SP = 1f
+        const val BACK_ICON_MAX_SIZE_DP = 32
+        const val BACK_ICON_GAP_DP = 8
+        // ic_dp_back has four transparent units on each side of its 24-unit viewport.
+        const val BACK_ICON_SIDE_INSET_FRACTION = 4f / 24f
+        const val BACK_ICON_TEXT_RATIO = 1f
+        const val BACK_HORIZONTAL_PADDING_DP = 24
+        const val BACK_VERTICAL_PADDING_DP = 12
+        const val BACK_MIN_HEIGHT_DP = 48
+        const val BACK_TOP_MARGIN_DP = 24
     }
 }
