@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="platform21_cluster_mode">Tarefa do painel Platform 21 (experimental)</string>
+    <string name="platform21_cluster_description">Para a adaptação do controlador 21 do Tang DM-i 2023. Desligado por padrão. Usa apenas a tela de projeção verificada, mantém um mapa centralizado com metade da largura e não altera os modos originais do painel nem desativa o mapa original. Requer ADB local previamente autorizado. Aplicar esta configuração reconecta o CarPlay. Esta integração do projeto original precisa de um teste com o carro parado.</string>
+</resources>
