@@ -5158,7 +5158,8 @@ open class CarPlayHostActivity : ComponentActivity() {
 
     private fun defaultAirPlayIconBytes(): ByteArray =
         // Shown in CarPlay's app list as the "back to the car" button.
-        resources.openRawResource(R.raw.ic_car_home).use { it.readBytes() }
+        // The dark variant is sent when CarPlay starts in night mode; the iPhone reads the icon only at connection time.
+        resources.openRawResource(if (darkMode) R.raw.ic_car_home_dark else R.raw.ic_car_home).use { it.readBytes() }
 
     private fun updateAirPlayIconPreview() {
         val preview = iconPreviewView ?: return
