@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="contrib_audio_home_channel_preview_unavailable">Não é possível pré-ouvir o stream de áudio %1$d do Android neste aparelho.</string>
+    <string name="contrib_audio_home_choice_summary">%1$s · %2$s</string>
+    <string name="contrib_audio_home_media_channel_label">Stream de áudio de mídia</string>
+    <string name="contrib_audio_home_nav_channel_label">Stream de áudio de navegação</string>
+    <string name="contrib_audio_home_nav_channel_note">0 = roteamento automático. Os valores de 1 a 20 selecionam IDs antigos de stream de áudio, inclusive saídas específicas do fabricante quando a central multimídia as suporta. Toque em um valor para pré-ouvi-lo. As alterações valem ao reconectar.</string>
+    <string name="contrib_audio_home_toggle_audio_focus">Foco de áudio</string>
+    <string name="contrib_audio_home_toggle_audio_focus_desc">A mídia do CarPlay solicita o foco de áudio. Se o som sumir enquanto estiver ativado (algumas centrais multimídia lidam mal com o foco), desligue. As alterações valem ao reconectar.</string>
+    <string name="audio_focus_auto_yield">Silenciar a mídia na perda temporária de foco</string>
+    <string name="audio_focus_auto_yield_desc">Com o foco de áudio ativado, silencia a mídia durante interrupções de áudio do Android, inclusive chamadas. Restaura o áudio quando o foco volta. Desative se a sua central multimídia não devolver o foco. As alterações valem ao reconectar.</string>
+</resources>

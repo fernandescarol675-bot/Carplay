@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_hide_byd_call_popup">Ocultar o pop-up de chamada da BYD (experimental)</string>
+    <string name="settings_hide_byd_call_popup_description">Somente para centrais BYD com Android 10 ou superior. Requer ADB local aprovado. Oculta o pop-up de chamada nativo enquanto o CarPlay conectado está em primeiro plano; o restaura em segundo plano. Não altera o áudio Bluetooth nem oculta o app de telefone completo.</string>
+</resources>

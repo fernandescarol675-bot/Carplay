@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="hotspot_join_title">Conexão automática ao hotspot (experimental)</string>
+    <string name="hotspot_join_description">Reparo opcional para firmwares compatíveis com Android 13+ e hotspot do carro apenas em 5 GHz. A verificação prepara um backup privado para reversão sem alterar o hotspot. Requer ADB local autorizado em localhost:5555; o pareamento por depuração sem fio com TLS não é compatível.</string>
+    <string name="hotspot_join_check">Verificar reparo do hotspot</string>
+    <string name="hotspot_join_apply">Adicionar informações de conexão automática</string>
+    <string name="hotspot_join_restore">Restaurar hotspot salvo</string>
+    <string name="hotspot_join_working">Verificando ou atualizando… Se cancelar, pode ser necessária uma nova verificação para confirmar o resultado.</string>
+    <string name="hotspot_join_confirm">Com o carro parado, desconecte o CarPlay e desligue primeiro o hotspot nas configurações do carro. Esta ação altera apenas a configuração salva do hotspot e confirma a leitura. Depois, ligue o hotspot novamente por conta própria para atualizar as transmissões. Os clientes conectados serão desconectados quando você o desligar. Mantenha o backup privado para reversão.</string>
+    <string name="hotspot_join_disconnect">Desconecte o CarPlay antes de alterar o hotspot.</string>
+    <string name="hotspot_join_ready">Configuração de 5 GHz compatível. Backup privado completo preparado; nenhuma alteração feita no hotspot ainda.</string>
+    <string name="hotspot_join_present">As informações testadas já estão presentes. Nada foi duplicado; o DiPlay não tem controle de reversão sobre um elemento já existente.</string>
+    <string name="hotspot_join_applied">Configuração salva e verificada. Ligue o hotspot nas configurações do carro para atualizar as transmissões e depois teste a conexão automática. O sucesso da transmissão e do CarPlay ainda exige teste no aparelho.</string>
+    <string name="hotspot_join_restored">Configuração salva restaurada por completo e verificada. Ligue o hotspot nas configurações do carro.</string>
+    <string name="hotspot_join_unsupported">API, firmware, banda ou informações do fabricante incompatíveis ou conflitantes. Nenhum reparo aplicado. Use uma configuração compatível somente em 5 GHz; outras bandas não foram verificadas.</string>
+    <string name="hotspot_join_off_required">É preciso confirmar que o hotspot está desligado. Desconecte os clientes e desligue-o nas configurações do carro, depois tente de novo. O DiPlay não o reiniciará automaticamente.</string>
+    <string name="hotspot_join_drift">A configuração mudou desde o backup. Nada foi sobrescrito. Verifique de novo; um backup de reversão pendente foi mantido.</string>
+    <string name="hotspot_join_firmware_changed">O firmware mudou. O backup privado foi mantido, mas não pode ser restaurado com segurança neste firmware.</string>
+    <string name="hotspot_join_cancelled">Cancelado antes de gravar. Verifique de novo para inspecionar qualquer estado de reversão mantido.</string>
+    <string name="hotspot_join_failed_restored">O reparo falhou ou foi cancelado após a gravação. A configuração original foi restaurada e a leitura confirmada.</string>
+    <string name="hotspot_join_busy">Outra operação de hotspot ainda está em andamento. Aguarde e verifique de novo.</string>
+    <string name="hotspot_join_adb_required">Requer ADB local simples aprovado em localhost:5555. Ative e autorize usando a configuração compatível do seu carro. O pareamento por depuração sem fio com TLS do Android não funciona sozinho.</string>
+    <string name="hotspot_join_recovery">O resultado ou a verificação do backup é incerto. Desligue o hotspot e verifique de novo antes de continuar. Um backup privado existente foi mantido; a restauração só é permitida se a configuração ainda for a mesma.</string>
+</resources>
